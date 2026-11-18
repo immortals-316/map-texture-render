@@ -1,0 +1,12 @@
+{
+  "name": "map-texture-render",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "render": "node src/render.js"
+  },
+  "dependencies": {
+    "geotiff": "^2.1.3",
+    "pngjs": "^7.0.0"
+  }
+}
