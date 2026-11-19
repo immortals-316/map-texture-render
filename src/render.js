@@ -6,6 +6,7 @@ import { parseArgs } from "node:util";
 import { PNG } from "pngjs";
 import { findJob, jobsForLayer } from "./catalog.js";
 import { openDem, readTiledNearest } from "./dem.js";
+import { cropBox, gridSize, placement, windowFrame } from "./layout.js";
 import {
   boxMean,
   castShadowFactor,
@@ -25,7 +26,6 @@ import {
   CAST_Z_EXAG,
   DEFAULT_ASPECT_SCALE,
   DEFAULT_CANVAS,
-  DEFAULT_MAX_PLACED,
   DEFAULT_NODATA,
   DEFAULT_SUPERSAMPLE,
   DEFAULT_WORK_WIDTH,
@@ -426,20 +426,12 @@ async function renderMap(options) {
     ? `Map extends outside DEM bounds; rendering DEM∩map only. DEM E=${demEast.toFixed(6)} vs map E=${mapBounds.east.toFixed(6)}; DEM W=${demWest.toFixed(6)} vs map W=${mapBounds.west.toFixed(6)}; DEM N=${demNorth.toFixed(6)} vs map N=${mapBounds.north.toFixed(6)}; DEM S=${demSouth.toFixed(6)} vs map S=${mapBounds.south.toFixed(6)}`
     : null;
 
-  const scaleX = (demEast - demWest) / dem.width;
-  const scaleY = (demNorth - demSouth) / dem.height;
-  const col0 = Math.max(0, Math.min(dem.width - 1, Math.floor((overlapWest - demWest) / scaleX)));
-  const col1 = Math.max(col0 + 1, Math.min(dem.width, Math.ceil((overlapEast - demWest) / scaleX)));
-  const row0 = Math.max(0, Math.min(dem.height - 1, Math.floor((demNorth - overlapNorth) / scaleY)));
-  const row1 = Math.max(row0 + 1, Math.min(dem.height, Math.ceil((demNorth - overlapSouth) / scaleY)));
-  const west = demWest + col0 * scaleX;
-  const east = demWest + col1 * scaleX;
-  const north = demNorth - row0 * scaleY;
-  const south = demNorth - row1 * scaleY;
-  const sourceWidth = col1 - col0;
-  const sourceHeight = row1 - row0;
-  const gridWidth = Math.max(1, Math.min(maxWorkWidth, sourceWidth));
-  const workHeight = Math.max(1, Math.round((sourceHeight / sourceWidth) * gridWidth));
+  const sampledFrame = windowFrame(
+    { width: dem.width, height: dem.height, west: demWest, south: demSouth, east: demEast, north: demNorth },
+    { west: overlapWest, east: overlapEast, south: overlapSouth, north: overlapNorth },
+  );
+  const { col0, row0, col1, row1, west, south, east, north, sourceWidth, sourceHeight } = sampledFrame;
+  const { gridWidth, workHeight } = gridSize(sourceWidth, sourceHeight, maxWorkWidth);
   log(
     `tiled_read window ${sourceWidth}x${sourceHeight} of ${dem.width}x${dem.height} -> ${gridWidth}x${workHeight}`,
   );
@@ -541,28 +533,7 @@ async function renderMap(options) {
   for (let i = 0; i < valid.length; i += 1) coverage[i] = valid[i] ? 255 : 0;
   const softAlpha = separableBlur(coverage, gridWidth, workHeight, 0.55);
 
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const polygon of polygons(data)) {
-    for (const ring of polygon) {
-      for (const [lon, lat] of ring) {
-        const x = ((lon - west) / (east - west)) * (gridWidth - 1);
-        const y = ((north - lat) / (north - south)) * (workHeight - 1);
-        minX = Math.min(minX, x);
-        minY = Math.min(minY, y);
-        maxX = Math.max(maxX, x);
-        maxY = Math.max(maxY, y);
-      }
-    }
-  }
-  const crop = [
-    Math.max(0, Math.floor(minX) - 6),
-    Math.max(0, Math.floor(minY) - 6),
-    Math.min(gridWidth, Math.ceil(maxX) + 1 + 6),
-    Math.min(workHeight, Math.ceil(maxY) + 1 + 6),
-  ];
+  const crop = cropBox(data, frame, gridWidth, workHeight);
   const cropWidth = crop[2] - crop[0];
   const cropHeight = crop[3] - crop[1];
   const premultiplied = new Float32Array(cropWidth * cropHeight * 4);
@@ -579,12 +550,13 @@ async function renderMap(options) {
     }
   }
 
-  const maxPlacedWidth = Math.round((canvasWidth * DEFAULT_MAX_PLACED[0]) / DEFAULT_CANVAS[0]);
-  const maxPlacedHeight = Math.round((canvasHeight * DEFAULT_MAX_PLACED[1]) / DEFAULT_CANVAS[1]);
-  const displayWidth = cropWidth * aspectScale;
-  const fit = Math.min(maxPlacedWidth / displayWidth, maxPlacedHeight / cropHeight);
-  const placedWidth = Math.round(displayWidth * fit);
-  const placedHeight = Math.round(cropHeight * fit);
+  const { placedWidth, placedHeight, originX, originY } = placement(
+    cropWidth,
+    cropHeight,
+    canvasWidth,
+    canvasHeight,
+    aspectScale,
+  );
   log(`place ${cropWidth}x${cropHeight} -> ${placedWidth}x${placedHeight}`);
   const placed = resizeRgba(premultiplied, cropWidth, cropHeight, placedWidth, placedHeight);
   for (let i = 0; i < placedWidth * placedHeight; i += 1) {
@@ -604,8 +576,6 @@ async function renderMap(options) {
     placed[offset + 3] = clip(Math.round(alpha), 0, 255);
   }
 
-  const originX = Math.floor((canvasWidth - placedWidth) / 2);
-  const originY = Math.floor((canvasHeight - placedHeight) / 2);
   const canvas = new Uint8ClampedArray(canvasWidth * canvasHeight * 4);
   for (let y = 0; y < placedHeight; y += 1) {
     const target = ((y + originY) * canvasWidth + originX) * 4;
